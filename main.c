@@ -8,6 +8,8 @@
 #include <net/if.h>
 #include <netinet/ether.h>
 #include <unistd.h>
+#include <sys/time.h>
+#include <math.h>
 
 
 #define INTERFACE_NAME "enp2s0"
@@ -47,7 +49,7 @@ void color_frame_to_eth(uint16_t led_index) {
     uint8_t led_col = 0;
 
     uint8_t i, j, k, l;
-    uint16_t frame_buffer_bit_index = 0;
+    uint16_t frame_buffer_bit_index = 8 * (HEADER_BYTES + LED_INDEX_BYTES);
 
     memset(frame_buffer + HEADER_BYTES + LED_INDEX_BYTES, 0, DATA_BYTES);
 
@@ -56,23 +58,14 @@ void color_frame_to_eth(uint16_t led_index) {
         for (j = 0; j < 8; ++j) {
             /* For each row of chunks */
             for (k = 0; k < 9; ++k) {
+                led_row = chunk_led_row + k * CHUNK_ROWS;
                 /* For each column of chunks */
                 for (l = 0; l < 3; ++l) {
-                    led_row = chunk_led_row + k * CHUNK_ROWS;
                     led_col = chunk_led_col + l * CHUNK_COLS;
 
                     /* Select bit j from color_frame, place in chunk_index bit of current_bits */
                     frame_buffer[frame_buffer_bit_index / 8] |=
-                        (((color_frame[led_row][led_col][i] >> j) & 1U) << (frame_buffer_bit_index % 8));
-                    /*
-                    printf(
-                        "frame_buffer_bit_index: %d    led_row: %d    led_col: %d    bit: %d\n",
-                        frame_buffer_bit_index,
-                        led_row,
-                        led_col,
-                        ((color_frame[led_row][led_col][i] >> j) & 1U)
-                    );
-                    */
+                        (((color_frame[led_row][led_col][i] >> (7 - j)) & 1U) << frame_buffer_bit_index % 8);
 
                     ++frame_buffer_bit_index;
                 }
@@ -81,6 +74,10 @@ void color_frame_to_eth(uint16_t led_index) {
     }
 }
 
+double get_millis(struct timeval *tv) {
+    gettimeofday(tv, 0);
+    return tv->tv_sec * 1000 + tv->tv_usec / 1000.0; 
+}
 
 int main() {
     int socket_fd;
@@ -91,18 +88,14 @@ int main() {
     struct ether_header *eth_head = (struct ether_header *) frame_buffer;
     struct sockaddr_ll socket_address;
 
-    uint16_t led_index = 0;  /* [0, CHUNK_LEDS - 1] */
     uint16_t i, j;
 
-    memset(frame_buffer, 0, FRAME_BYTES);
+    struct timeval tv;
+    double millis;
+    double frame_start_millis;
+    double frame_stop_millis;
 
-    for (i = 0; i < LED_ROWS; ++i) {
-        for (j = 0; j < LED_COLS; ++j) {
-            color_frame[i][j][0] = 0xff;  /* G */
-            color_frame[i][j][1] = 0xff;  /* R */
-            color_frame[i][j][2] = 0xff;  /* B */
-        }
-    }
+    memset(frame_buffer, 0, FRAME_BYTES);
 
     if ((socket_fd = socket(AF_PACKET, SOCK_RAW, IPPROTO_RAW)) == -1) {
         perror("Error [socket]");
@@ -138,32 +131,41 @@ int main() {
     socket_address.sll_halen = ETH_ALEN;
 
     while (1) {
-        /* Set LED index */
-        frame_buffer[HEADER_BYTES] = (uint8_t) (led_index & 0x00ff);
-        frame_buffer[HEADER_BYTES + 1] = (uint8_t) (led_index >> 8);
+        millis = get_millis(&tv);
 
-        /* Set packet data */
-        color_frame_to_eth(led_index);
-
-        /*
-        for (i = HEADER_BYTES + LED_INDEX_BYTES; i < FRAME_BYTES; ++i) {
-            printf("Byte %d: %x\n", i, frame_buffer[i]);
-        }
-        printf("\n\n");
-        */
-
-        /* Send packet */
-        if (sendto(socket_fd, frame_buffer, FRAME_BYTES, 0, (struct sockaddr *) &socket_address, sizeof(struct sockaddr_ll)) < 0) {
-            perror("Error [sendto]");
-            return ERROR_OUT;
+        /* Set colors for full dance floor frame */
+        uint8_t rBrightness = (uint8_t) (50 * sin(millis * 2 * 3.14159 / 2000.0) + 50);
+        uint8_t bBrightness = (uint8_t) (50 * sin(millis * 2 * 3.14159 / 2000.0 + 3.14159) + 50);
+        for (i = 0; i < LED_ROWS; ++i) {
+            for (j = 0; j < LED_COLS; ++j) {
+                color_frame[i][j][0] = 0x00;  /* G */
+                color_frame[i][j][1] = rBrightness;  /* R */
+                color_frame[i][j][2] = bBrightness;  /* B */
+            }
         }
 
-        ++led_index;
-        if (led_index == CHUNK_LEDS) {
-            led_index = 0;
+        frame_start_millis = get_millis(&tv);
+
+        /* Send Ethernet packets for each LED */
+        for (i = 0; i < CHUNK_LEDS; ++i) {
+            /* Set LED index */
+            frame_buffer[HEADER_BYTES] = (uint8_t) (i & 0x00ff);
+            frame_buffer[HEADER_BYTES + 1] = (uint8_t) (i >> 8);
+
+            /* Set packet data */
+            color_frame_to_eth(i);
+
+            /* Send packet */
+            if (sendto(socket_fd, frame_buffer, FRAME_BYTES, 0, (struct sockaddr *) &socket_address, sizeof(struct sockaddr_ll)) < 0) {
+                perror("Error [sendto]");
+                return ERROR_OUT;
+            }
+
+            usleep(10);
         }
 
-        usleep(20);
+        frame_stop_millis = get_millis(&tv);
+        printf("Frame write time (ms): %f\n", frame_stop_millis - frame_start_millis);
     }
 
     return 0;
