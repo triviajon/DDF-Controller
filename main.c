@@ -64,7 +64,7 @@ void color_frame_to_eth(uint16_t led_index) {
                     /* Select bit j from color_frame, place in chunk_index bit of current_bits */
                     frame_buffer[frame_buffer_bit_index / 8] |=
                         (((color_frame[led_row][led_col][i] >> j) & 1U) << (frame_buffer_bit_index % 8));
-
+                    /*
                     printf(
                         "frame_buffer_bit_index: %d    led_row: %d    led_col: %d    bit: %d\n",
                         frame_buffer_bit_index,
@@ -72,6 +72,7 @@ void color_frame_to_eth(uint16_t led_index) {
                         led_col,
                         ((color_frame[led_row][led_col][i] >> j) & 1U)
                     );
+                    */
 
                     ++frame_buffer_bit_index;
                 }
@@ -162,7 +163,7 @@ int main() {
             led_index = 0;
         }
 
-        usleep(3000000);
+        usleep(20);
     }
 
     return 0;
