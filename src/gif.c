@@ -1,79 +1,17 @@
-#include <stdio.h>
-#include <stdint.h>
-#include <stdlib.h>
-
-#define SUCC_OUT 0
-#define ERROR_OUT -1
-
-#define DEBUG 1
-#define DEBUG_CT 1  /* Display color table data */
+#include "gif.h"
 
 #define DISPOSAL_NONE 0  /* No disposal assigned */
 #define DISPOSAL_RETAIN 1  /* Do not dispose current frame */
 #define DISPOSAL_BG 2  /* Replace current frame with background color */
 #define DISPOSAL_PREV 3  /* Revert to previous frame */
 
-#define FRAME_ALLOC_BLOCK 8
-
-#define CT_GLOBAL 0
-#define CT_LOCAL 1
-
-/* Graphic control extension */
-struct gce {
-    uint8_t disposal;
-    uint8_t has_transparency;
-    uint16_t delay;
-    uint8_t transparent_index;
-};
-
-/* Image descriptor */
-struct id {
-    uint16_t img_left;
-    uint16_t img_top;
-    uint16_t img_w;
-    uint16_t img_h;
-    uint8_t is_interlaced;
-};
-
-struct frame {
-    uint8_t lct[256][3];
-    uint8_t has_lct;
-    uint8_t *ct_indices;  /* Size: canvas_w * canvas_h */
-
-    uint16_t delay;
-
-    /* DISPOSAL_RETAIN - Keep transparent pixels
-       Any other disposal type - Replace transparent pixels with background color
-       Any pixels outside frame boundaries become transparent */
-    uint8_t disposal;
-    uint8_t has_transparency;
-    uint8_t transparent_index;
-};
-
-struct gif {
-    uint16_t w;
-    uint16_t h;
-
-    uint8_t gct[256][3];
-    uint8_t has_gct;
-
-    uint8_t bg_index;
-
-    struct frame *frames;
-    uint16_t num_frames;
-    uint16_t frame_capacity;
-};
-
-uint16_t combine_bytes(uint8_t lsb, uint8_t msb) {
-    return ((uint16_t) lsb) | (((uint16_t) msb) << 8);
-}
-
 void gif_init(struct gif *gif) {
-    gif->num_frames = 0;
-    gif->frame_capacity = 0;
+    dyn_arr_init(&gif->frames, 8, sizeof(struct frame));
 }
 
-void gif_load_ct(struct gif *gif, uint8_t max_ct_color, uint8_t ct_type, FILE *file) {    
+void gif_load_ct(struct gif *gif, uint8_t max_ct_color, struct frame *frame, FILE *file) {    
+    /* Load a global color table if frame is null, or a local color table otherwise */
+
     uint8_t i, j;
     uint16_t ct_bytes;
     uint16_t ct_byte;
@@ -85,7 +23,7 @@ void gif_load_ct(struct gif *gif, uint8_t max_ct_color, uint8_t ct_type, FILE *f
     fread(ct, 1, ct_bytes, file);
 
     #if DEBUG_CT
-        if (ct_type == CT_LOCAL) {
+        if (frame) {
             printf("Local color table:\n");
         }
         else {
@@ -105,8 +43,8 @@ void gif_load_ct(struct gif *gif, uint8_t max_ct_color, uint8_t ct_type, FILE *f
         #endif
 
         for (j = 0; j < 3; ++j) {
-            if (ct_type == CT_LOCAL) {
-                gif->frames[gif->num_frames].lct[i][j] = ct[ct_byte];
+            if (frame) {
+                frame->lct[i][j] = ct[ct_byte];
             }
             else {
                 gif->gct[i][j] = ct[ct_byte];
@@ -123,8 +61,88 @@ void gif_load_ct(struct gif *gif, uint8_t max_ct_color, uint8_t ct_type, FILE *f
     free(ct);
 }
 
-void gif_decode(struct gif *gif, uint8_t *frame_codes, uint16_t code_bytes) {
+void gif_decode(
+    struct gif *gif,
+    struct id *id,
+    struct frame *frame,
+    uint8_t *frame_codes, uint32_t code_bytes,
+    uint8_t min_code_size
+) {
     /* Decode LZW data */
+
+    uint8_t i, j;
+    uint16_t code = 0;
+    uint8_t code_size = min_code_size + 1;
+    uint8_t code_bit_index = 0;
+
+    /* Counters to track position on canvas */
+    uint16_t frame_row = 0;
+    uint16_t frame_col = 0;
+    uint32_t index_counter = 0;
+
+    uint16_t outside_bounds_index;  /* Color of pixels outside frame */
+
+    /* uint16_t **code_table; */
+
+    frame->ct_indices = (uint8_t *) malloc(gif->w * gif->h);
+
+    if (frame->disposal == DISPOSAL_RETAIN) {
+        outside_bounds_index = frame->transparent_index;
+    }
+    else {
+        outside_bounds_index = gif->bg_index;
+    }
+
+    for (i = 0; i < code_bytes; ++i) {
+        for (j = 0; j < 8; ++j) {
+            /* Grab code_size bits from frame_codes one bit at a time */
+            code |= ((frame_codes[i] >> (7 - j)) & 1U) << (code_size - code_bit_index - 1);
+            ++code_bit_index;
+            if (code_bit_index == code_size) {
+                /* Finished reading single code */
+ 
+                while (frame_row < id->img_top || frame_row >= id->img_top + id->img_h ||
+                    frame_col < id->img_left || frame_col >= id->img_left + id->img_w) {
+                    /* Outside bounds of frame on canvas */
+                
+                    if (frame->disposal == DISPOSAL_RETAIN) {
+                        frame->ct_indices[index_counter] = outside_bounds_index;
+                    }
+
+                    ++index_counter;
+                    ++frame_col;
+                    if (frame_col == gif->w) {
+                        frame_col = 0;
+                        ++frame_row;
+                        if (frame_row == gif->h) {
+                            frame_row = 0;
+                            return;
+                        }
+                    }
+                }
+                
+                /* Convert code into indices, add indices to frame */
+                
+                ++index_counter;
+                ++frame_col;
+                if (frame_col == gif->w) {
+                    frame_col = 0;
+                    ++frame_row;
+                    if (frame_row == gif->h) {
+                        frame_row = 0;
+                        return;
+                    }
+                }
+
+                if (code == (1U << code_size) - 1) {
+                    /* Need to expand code size */
+                    ++code_size;
+                }
+                code = 0;
+                code_bit_index = 0;
+            }
+        }
+    }
 }
 
 int gif_load_frame(struct gif *gif, struct gce *gce, uint8_t *buffer, FILE *file) { 
@@ -137,21 +155,21 @@ int gif_load_frame(struct gif *gif, struct gce *gce, uint8_t *buffer, FILE *file
     uint32_t code_bytes = 0;
     uint8_t min_code_size;
 
-    if (gif->frame_capacity == gif->num_frames) {
-        if (!gif->num_frames) {
-            /* No memory allocated yet for frames */
-            gif->frames = (struct frame *) malloc(
-                FRAME_ALLOC_BLOCK * sizeof(struct frame)
-            );
-        }
-        else {
-            /* Extend frame memory */
-            gif->frames = (struct frame *) realloc(
-                gif->frames,
-                (gif->num_frames + FRAME_ALLOC_BLOCK) * sizeof(struct frame)
-            );
-        }
-        gif->frame_capacity += FRAME_ALLOC_BLOCK;
+    struct frame new_frame;
+    struct frame *frame = (struct frame *) dyn_arr_append(&gif->frames, &new_frame);
+
+    /* Graphic control extension */
+    if (gce) {
+        frame->delay = gce->delay;
+        frame->disposal = gce->disposal;
+        frame->has_transparency = gce->has_transparency;
+        frame->transparent_index = gce->transparent_index;
+    }
+    else {
+        frame->delay = 3;
+        frame->disposal = DISPOSAL_NONE;
+        frame->has_transparency = 0;
+        frame->transparent_index = gif->bg_index;
     }
 
     /* Image desriptor */
@@ -164,7 +182,7 @@ int gif_load_frame(struct gif *gif, struct gce *gce, uint8_t *buffer, FILE *file
     if (id.is_interlaced) {
         printf("Warning: GIF is interlaced, will be ignored\n");
     }
-    gif->frames[gif->num_frames].has_lct = (buffer[8] >> 7) & 1U;
+    frame->has_lct = (buffer[8] >> 7) & 1U;
 
     #if DEBUG
         printf("Image descriptor:\n");
@@ -172,15 +190,15 @@ int gif_load_frame(struct gif *gif, struct gce *gce, uint8_t *buffer, FILE *file
         printf("    Image top: %d\n", id.img_top);
         printf("    Image width: %d\n", id.img_w);
         printf("    Image height: %d\n", id.img_h);
-        printf("    LCT flag: %d\n", gif->frames[gif->num_frames].has_lct);
+        printf("    LCT flag: %d\n", frame->has_lct);
         printf("    Interlace flag: %d\n", id.is_interlaced);
         printf("    Sort flag: %d\n", (buffer[8] >> 5) & 1U);
-        printf("    LCT size: %d\n", buffer[8] & 0b111U);
+        printf("    LCT size: %d\n", buffer[8] & 7U);
     #endif
 
     /* Local color table */
-    if (gif->frames[gif->num_frames].has_lct) {
-        gif_load_ct(gif, (1U << ((buffer[8] & 0b111U) + 1)) - 1, CT_LOCAL, file);
+    if (frame->has_lct) {
+        gif_load_ct(gif, (1U << ((buffer[8] & 7U) + 1)) - 1, frame, file);
     }
     else if (!gif->has_gct) {
         printf("Error: Frame has no global or local color table\n");
@@ -197,34 +215,22 @@ int gif_load_frame(struct gif *gif, struct gce *gce, uint8_t *buffer, FILE *file
         }
 
         code_bytes += buffer[0];
-
-        if (!frame_codes) {
-            frame_codes = (uint8_t *) malloc(code_bytes);
-        }
-        else {
-            frame_codes = (uint8_t *) realloc(frame_codes, code_bytes);
-        }
-
+        frame_codes = (uint8_t *) realloc(frame_codes, code_bytes);
         fread(frame_codes + code_bytes - buffer[0], 1, buffer[0], file);
     }
 
-    gif_decode(gif, frame_codes, code_bytes);
+    #if DEBUG
+        printf("Decoding frame %ld...\n", gif->frames.length);
+    #endif
+    
+    gif_decode(gif, &id, frame, frame_codes, code_bytes, min_code_size);
     free(frame_codes);
 
     #if DEBUG
-        printf("Finished loading frame %d\n", gif->num_frames);
+        printf("Finished loading frame %ld\n", gif->frames.length);
     #endif
 
-    ++gif->num_frames;
-
     return SUCC_OUT;
-}
-
-void gif_squeeze_frames(struct gif *gif) {
-    /* Deallocate unused frame memory */
-    gif->frames = (struct frame *) realloc(
-        gif->frames, gif->num_frames * sizeof(struct frame)
-    );
 }
 
 int gif_load(struct gif *gif, const char *filename) {
@@ -257,15 +263,15 @@ int gif_load(struct gif *gif, const char *filename) {
         printf("    Canvas width: %d\n", gif->w);
         printf("    Canvas height: %d\n", gif->h);
         printf("    GCT flag: %d\n", gif->has_gct);
-        printf("    Color resolution: %d\n", (buffer[4] >> 4) & 0b111U);
+        printf("    Color resolution: %d\n", (buffer[4] >> 4) & 7U);
         printf("    Sort flag: %d\n", (buffer[4] >> 3) & 1U);
-        printf("    GCT size: %d\n", buffer[4] & 0b111U);
+        printf("    GCT size: %d\n", buffer[4] & 7U);
         printf("    Background color index: %d\n", gif->bg_index);
         printf("    Pixel aspect ratio: %d\n", buffer[6]);
     #endif
 
     if (gif->has_gct) {
-        gif_load_ct(gif, (1U << ((buffer[4] & 0b111U) + 1)) - 1, CT_GLOBAL, file);
+        gif_load_ct(gif, (1U << ((buffer[4] & 7U) + 1)) - 1, 0, file);
     }
 
     while (1) {
@@ -285,7 +291,7 @@ int gif_load(struct gif *gif, const char *filename) {
                 fread(buffer, 1, 1, file);  /* Get block size */
                 fread(buffer, 1, buffer[0] + 1, file);  /* Get block data */
                 gce.has_transparency = buffer[0] & 1U;
-                gce.disposal = (buffer[0] >> 2) & 0b111U;
+                gce.disposal = (buffer[0] >> 2) & 7U;
                 if (gce.disposal == DISPOSAL_PREV) {
                     printf("Warning: DISPOSAL_PREV disposal type unsupported\n");
                 }
@@ -338,26 +344,25 @@ int gif_load(struct gif *gif, const char *filename) {
         }
     }
 
-    gif_squeeze_frames(gif);
+    dyn_arr_squeeze(&gif->frames);
 
     #if DEBUG
-        printf("Loaded %d frames\n", gif->num_frames);
+        printf("Loaded %ld frames\n", gif->frames.length);
     #endif
 
     return SUCC_OUT;
 }
 
 void gif_free(struct gif *gif) {
-    /* TODO - Disabled for testing */
+    size_t i;
+    struct frame *frame;
 
-    /*
-    uint16_t i;
-    for (i = 0; i < gif->num_frames; ++i) {
-        free(gif->frames[i].ct_indices);
+    for (i = 0; i < gif->frames.length; ++i) {
+        frame = (struct frame *) dyn_arr_get(&gif->frames, i);
+        free(frame->ct_indices);
     }
-    */
 
-    free(gif->frames);
+    dyn_arr_free(&gif->frames);
 }
 
 int main() {
