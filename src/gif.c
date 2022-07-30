@@ -22,14 +22,18 @@ void gif_load_ct(struct gif *gif, uint8_t max_ct_color, struct frame *frame, FIL
     ct = (uint8_t *) malloc(ct_bytes);
     fread(ct, 1, ct_bytes, file);
 
-    #if DEBUG_CT
-        if (frame) {
+    if (frame) {
+        frame->max_ct_color = max_ct_color;
+        #if DEBUG_CT
             printf("Local color table:\n");
-        }
-        else {
+        #endif
+    }
+    else {
+        gif->max_gct_color = max_ct_color;
+        #if DEBUG_CT
             printf("Global color table:\n");
-        }
-    #endif
+        #endif
+    }
 
     i = 0;
     while (1) {
@@ -61,6 +65,64 @@ void gif_load_ct(struct gif *gif, uint8_t max_ct_color, struct frame *frame, FIL
     free(ct);
 }
 
+void gif_init_code_table(struct dyn_arr *code_table, struct frame *frame) {
+    /* Initialize code table with gct or lct indices, clear code, EOI code */
+
+    struct code_table_entry entry;
+    uint8_t i = 0;
+
+    while (1) {
+        entry.indices = (uint8_t *) malloc(1);
+        entry.length = 1;
+        entry.indices[0] = i;
+        dyn_arr_append(code_table, &entry);
+
+        if (i == frame->max_ct_color) {
+            break;
+        }
+
+        ++i;
+    }
+
+    entry.indices = 0;
+    entry.length = 0;
+
+    dyn_arr_append(code_table, &entry);  /* Clear code */
+    dyn_arr_append(code_table, &entry);  /* EOI code */
+}
+
+void gif_free_code_table(struct dyn_arr *code_table) {
+    struct code_table_entry *entry;
+    uint16_t i;
+
+    for (i = 0; i < code_table->length; ++i) {
+        entry = (struct code_table_entry *) dyn_arr_get(code_table, i);
+        free(entry->indices);
+    }
+
+    dyn_arr_free(code_table);
+}
+
+uint8_t gif_increment_decode(
+    struct gif *gif,
+    uint16_t *frame_row,
+    uint16_t *frame_col,
+    uint32_t *index_counter
+) {
+    /* Increment decode counters, return 0 if at end */
+    ++(*index_counter);
+    ++(*frame_col);
+    if (*frame_col == gif->w) {
+        *frame_col = 0;
+        ++(*frame_row);
+        if (*frame_row == gif->h) {
+            *frame_row = 0;
+            return 0;
+        }
+    }
+    return 1;
+}
+
 void gif_decode(
     struct gif *gif,
     struct id *id,
@@ -70,9 +132,12 @@ void gif_decode(
 ) {
     /* Decode LZW data */
 
-    uint8_t i, j;
+    uint32_t i;
+    uint8_t j;
+    uint16_t k;
     uint16_t code = 0;
-    uint8_t code_size = min_code_size + 1;
+    uint16_t prev_code = 0;
+    uint16_t code_size = min_code_size + 1;
     uint8_t code_bit_index = 0;
 
     /* Counters to track position on canvas */
@@ -80,10 +145,15 @@ void gif_decode(
     uint16_t frame_col = 0;
     uint32_t index_counter = 0;
 
-    uint16_t outside_bounds_index;  /* Color of pixels outside frame */
+    uint16_t outside_bounds_index;  /* Color of pixels outside frame */ 
 
-    /* uint16_t **code_table; */
+    struct dyn_arr code_table;
+    struct code_table_entry *prev_entry;
+    struct code_table_entry *rd_entry;
+    struct code_table_entry wr_entry;
+    uint8_t has_read_init_code = 0;
 
+    dyn_arr_init(&code_table, 16, sizeof(struct code_table_entry));
     frame->ct_indices = (uint8_t *) malloc(gif->w * gif->h);
 
     if (frame->disposal == DISPOSAL_RETAIN) {
@@ -96,7 +166,7 @@ void gif_decode(
     for (i = 0; i < code_bytes; ++i) {
         for (j = 0; j < 8; ++j) {
             /* Grab code_size bits from frame_codes one bit at a time */
-            code |= ((frame_codes[i] >> (7 - j)) & 1U) << (code_size - code_bit_index - 1);
+            code |= ((frame_codes[i] >> j) & 1U) << code_bit_index;
             ++code_bit_index;
             if (code_bit_index == code_size) {
                 /* Finished reading single code */
@@ -109,40 +179,72 @@ void gif_decode(
                         frame->ct_indices[index_counter] = outside_bounds_index;
                     }
 
-                    ++index_counter;
-                    ++frame_col;
-                    if (frame_col == gif->w) {
-                        frame_col = 0;
-                        ++frame_row;
-                        if (frame_row == gif->h) {
-                            frame_row = 0;
-                            return;
-                        }
-                    }
-                }
-                
-                /* Convert code into indices, add indices to frame */
-                
-                ++index_counter;
-                ++frame_col;
-                if (frame_col == gif->w) {
-                    frame_col = 0;
-                    ++frame_row;
-                    if (frame_row == gif->h) {
-                        frame_row = 0;
-                        return;
+                    if (!gif_increment_decode(gif, &frame_row, &frame_col, &index_counter)) {
+                        goto gif_decode_end;
                     }
                 }
 
-                if (code == (1U << code_size) - 1) {
-                    /* Need to expand code size */
-                    ++code_size;
+                if (code == ((uint16_t) frame->max_ct_color) + 1) {
+                    /* Clear code */
+                    gif_free_code_table(&code_table);
+                    gif_init_code_table(&code_table, frame);
+                    code_size = min_code_size + 1;
+                    has_read_init_code = 0;
                 }
+                else if (code == ((uint16_t) frame->max_ct_color) + 2) {
+                    /* EOI code */
+                    goto gif_decode_end;
+                }
+                else {
+                    if (code < code_table.length) {
+                        /* Code is in code table */
+                        rd_entry = (struct code_table_entry *) dyn_arr_get(&code_table, code);
+                    }
+
+                    if (has_read_init_code && code_table.length) {
+                        /* Only update code table if this is not the first code read */
+                        prev_entry = (struct code_table_entry *) dyn_arr_get(&code_table, prev_code);
+                        wr_entry.length = 1 + prev_entry->length; 
+                        wr_entry.indices = malloc(wr_entry.length);
+                        memcpy(wr_entry.indices, prev_entry->indices, prev_entry->length);
+
+                        if (code_table.length == (1U << code_size) - 1 && code_size < 12) {
+                            ++code_size;
+                        }
+
+                        if (code < code_table.length) {
+                            wr_entry.indices[prev_entry->length] = rd_entry->indices[0];
+                            dyn_arr_append(&code_table, &wr_entry);
+
+                            /* rd_entry may have been modified by realloc in dyn_arr_append */
+                            rd_entry = (struct code_table_entry *) dyn_arr_get(&code_table, code);
+                        }
+                        else {
+                            wr_entry.indices[prev_entry->length] = prev_entry->indices[0];
+                            rd_entry = (struct code_table_entry *) dyn_arr_append(&code_table, &wr_entry);
+                        }
+                    }
+
+                    /* Write to ct_indices */
+                    memcpy(frame->ct_indices + index_counter, rd_entry->indices, rd_entry->length);
+                    for (k = 0; k < rd_entry->length; ++k) {
+                        if (!gif_increment_decode(gif, &frame_row, &frame_col, &index_counter)) {
+                            goto gif_decode_end;
+                        }
+                    }
+
+                    prev_code = code;
+                    has_read_init_code = 1;
+                }
+
                 code = 0;
                 code_bit_index = 0;
             }
         }
     }
+
+gif_decode_end:
+    gif_free_code_table(&code_table);
 }
 
 int gif_load_frame(struct gif *gif, struct gce *gce, uint8_t *buffer, FILE *file) { 
@@ -200,9 +302,12 @@ int gif_load_frame(struct gif *gif, struct gce *gce, uint8_t *buffer, FILE *file
     if (frame->has_lct) {
         gif_load_ct(gif, (1U << ((buffer[8] & 7U) + 1)) - 1, frame, file);
     }
-    else if (!gif->has_gct) {
-        printf("Error: Frame has no global or local color table\n");
-        return ERROR_OUT;
+    else { 
+        if (!gif->has_gct) {
+            printf("Error: Frame has no global or local color table\n");
+            return ERROR_OUT;
+        }
+        frame->max_ct_color = gif->max_gct_color;
     }
 
     /* Image data */
@@ -220,7 +325,7 @@ int gif_load_frame(struct gif *gif, struct gce *gce, uint8_t *buffer, FILE *file
     }
 
     #if DEBUG
-        printf("Decoding frame %ld...\n", gif->frames.length);
+        printf("Decoding frame %ld (min code size: %d)...\n", gif->frames.length, min_code_size);
     #endif
     
     gif_decode(gif, &id, frame, frame_codes, code_bytes, min_code_size);
@@ -350,6 +455,8 @@ int gif_load(struct gif *gif, const char *filename) {
         printf("Loaded %ld frames\n", gif->frames.length);
     #endif
 
+    fclose(file);
+
     return SUCC_OUT;
 }
 
@@ -368,7 +475,7 @@ void gif_free(struct gif *gif) {
 int main() {
     struct gif gif;
     gif_init(&gif);
-    if (gif_load(&gif, "img/sample5.gif") == ERROR_OUT) {
+    if (gif_load(&gif, "img/sample6.gif") == ERROR_OUT) {
         return ERROR_OUT;
     }
     gif_free(&gif);

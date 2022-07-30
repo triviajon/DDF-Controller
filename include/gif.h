@@ -9,6 +9,12 @@
 #include "util.h"
 #include "dyn_arr.h"
 
+/* A row in the code table */
+struct code_table_entry {
+    uint8_t *indices;
+    uint16_t length;
+};
+
 /* Graphic control extension */
 struct gce {
     uint8_t disposal;
@@ -28,6 +34,7 @@ struct id {
 
 struct frame {
     uint8_t lct[256][3];
+    uint8_t max_ct_color;
     uint8_t has_lct;
 
     uint8_t *ct_indices;  /* Size: canvas_w * canvas_h */
@@ -47,6 +54,7 @@ struct gif {
     uint16_t h;
 
     uint8_t gct[256][3];
+    uint8_t max_gct_color;
     uint8_t has_gct;
 
     uint8_t bg_index;
@@ -56,6 +64,14 @@ struct gif {
 
 void gif_init(struct gif *gif);
 void gif_load_ct(struct gif *gif, uint8_t max_ct_color, struct frame *frame, FILE *file);
+void gif_init_code_table(struct dyn_arr *code_table, struct frame *frame);
+void gif_free_code_table(struct dyn_arr *code_table);
+uint8_t gif_increment_decode(
+    struct gif *gif,
+    uint16_t *frame_row,
+    uint16_t *frame_col,
+    uint32_t *index_counter
+); 
 void gif_decode(
     struct gif *gif,
     struct id *id,
