@@ -33,9 +33,9 @@ struct id {
 };
 
 struct frame {
-    uint8_t lct[256][3];
+    /* Will either hold LCT or GCT data, depending on what is given */
+    uint8_t ct[256][3];
     uint8_t max_ct_color;
-    uint8_t has_lct;
 
     uint8_t *ct_indices;  /* Size: canvas_w * canvas_h */
 

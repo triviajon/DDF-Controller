@@ -10,7 +10,7 @@ DEP_FILES := $(OBJ_FILES:.o=.d)
 
 INC_FLAG := $(addprefix -I,$(INCLUDE_DIR))
 LDLIBS=-lm
-CFLAGS=$(INC_FLAG) -MMD -MP -Wall -Wextra -ansi -pedantic
+CFLAGS=$(INC_FLAG) -MMD -MP -Wall -Wextra -std=gnu99 -pedantic
 
 .PHONY: clean
 

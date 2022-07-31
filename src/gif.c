@@ -48,7 +48,7 @@ void gif_load_ct(struct gif *gif, uint8_t max_ct_color, struct frame *frame, FIL
 
         for (j = 0; j < 3; ++j) {
             if (frame) {
-                frame->lct[i][j] = ct[ct_byte];
+                frame->ct[i][j] = ct[ct_byte];
             }
             else {
                 gif->gct[i][j] = ct[ct_byte];
@@ -66,7 +66,7 @@ void gif_load_ct(struct gif *gif, uint8_t max_ct_color, struct frame *frame, FIL
 }
 
 void gif_init_code_table(struct dyn_arr *code_table, struct frame *frame) {
-    /* Initialize code table with gct or lct indices, clear code, EOI code */
+    /* Initialize code table with GCT or LCT indices, clear code, EOI code */
 
     struct code_table_entry entry;
     uint8_t i = 0;
@@ -251,6 +251,8 @@ int gif_load_frame(struct gif *gif, struct gce *gce, uint8_t *buffer, FILE *file
     /* Load frame with (optional) GCE data
        Buffer must be able to contain at least 9 bytes */
 
+    uint8_t i, j;
+
     struct id id;
 
     uint8_t *frame_codes = 0;
@@ -259,6 +261,7 @@ int gif_load_frame(struct gif *gif, struct gce *gce, uint8_t *buffer, FILE *file
 
     struct frame new_frame;
     struct frame *frame = (struct frame *) dyn_arr_append(&gif->frames, &new_frame);
+    uint8_t frame_has_lct;
 
     /* Graphic control extension */
     if (gce) {
@@ -284,7 +287,7 @@ int gif_load_frame(struct gif *gif, struct gce *gce, uint8_t *buffer, FILE *file
     if (id.is_interlaced) {
         printf("Warning: GIF is interlaced, will be ignored\n");
     }
-    frame->has_lct = (buffer[8] >> 7) & 1U;
+    frame_has_lct = (buffer[8] >> 7) & 1U;
 
     #if DEBUG
         printf("Image descriptor:\n");
@@ -292,14 +295,14 @@ int gif_load_frame(struct gif *gif, struct gce *gce, uint8_t *buffer, FILE *file
         printf("    Image top: %d\n", id.img_top);
         printf("    Image width: %d\n", id.img_w);
         printf("    Image height: %d\n", id.img_h);
-        printf("    LCT flag: %d\n", frame->has_lct);
+        printf("    LCT flag: %d\n", frame_has_lct);
         printf("    Interlace flag: %d\n", id.is_interlaced);
         printf("    Sort flag: %d\n", (buffer[8] >> 5) & 1U);
         printf("    LCT size: %d\n", buffer[8] & 7U);
     #endif
 
     /* Local color table */
-    if (frame->has_lct) {
+    if (frame_has_lct) {
         gif_load_ct(gif, (1U << ((buffer[8] & 7U) + 1)) - 1, frame, file);
     }
     else { 
@@ -307,7 +310,20 @@ int gif_load_frame(struct gif *gif, struct gce *gce, uint8_t *buffer, FILE *file
             printf("Error: Frame has no global or local color table\n");
             return ERROR_OUT;
         }
+
         frame->max_ct_color = gif->max_gct_color;
+
+        /* Copy GCT into frame CT data */
+        i = 0;
+        while (1) {
+            for (j = 0; j < 3; ++j) {
+                frame->ct[i][j] = gif->gct[i][j];
+            }
+            if (i == frame->max_ct_color) {
+                break;
+            }
+            ++i;
+        }
     }
 
     /* Image data */
@@ -358,8 +374,14 @@ int gif_load(struct gif *gif, const char *filename) {
     
     /* Logical screen descriptor */
     fread(buffer, 1, 7, file);
+    
     gif->w = combine_bytes(buffer[0], buffer[1]);
     gif->h = combine_bytes(buffer[2], buffer[3]);
+    if (gif->w != LED_COLS || gif->h != LED_ROWS) {
+        printf("Error: Invalid GIF dimensions\n");
+        return ERROR_OUT;
+    }
+
     gif->has_gct = (buffer[4] >> 7) & 1U;
     gif->bg_index = buffer[5];
 
@@ -470,15 +492,5 @@ void gif_free(struct gif *gif) {
     }
 
     dyn_arr_free(&gif->frames);
-}
-
-int main() {
-    struct gif gif;
-    gif_init(&gif);
-    if (gif_load(&gif, "img/sample6.gif") == ERROR_OUT) {
-        return ERROR_OUT;
-    }
-    gif_free(&gif);
-    return SUCC_OUT;
 }
 
