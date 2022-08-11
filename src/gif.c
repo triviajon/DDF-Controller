@@ -157,7 +157,13 @@ void gif_decode(
     frame->ct_indices = (uint8_t *) malloc(gif->w * gif->h);
 
     if (frame->disposal == DISPOSAL_RETAIN) {
-        outside_bounds_index = frame->transparent_index;
+        if (frame->has_transparency) {
+            outside_bounds_index = frame->transparent_index;
+        }
+        else {
+            printf("Warning: Disposal type is DISPOSAL_RETAIN, but frame has no transparent index\n");
+            outside_bounds_index = gif->bg_index;
+        }
     }
     else {
         outside_bounds_index = gif->bg_index;
@@ -171,19 +177,6 @@ void gif_decode(
             if (code_bit_index == code_size) {
                 /* Finished reading single code */
  
-                while (frame_row < id->img_top || frame_row >= id->img_top + id->img_h ||
-                    frame_col < id->img_left || frame_col >= id->img_left + id->img_w) {
-                    /* Outside bounds of frame on canvas */
-                
-                    if (frame->disposal == DISPOSAL_RETAIN) {
-                        frame->ct_indices[index_counter] = outside_bounds_index;
-                    }
-
-                    if (!gif_increment_decode(gif, &frame_row, &frame_col, &index_counter)) {
-                        goto gif_decode_end;
-                    }
-                }
-
                 if (code == ((uint16_t) frame->max_ct_color) + 1) {
                     /* Clear code */
                     gif_free_code_table(&code_table);
@@ -193,7 +186,6 @@ void gif_decode(
                 }
                 else if (code == ((uint16_t) frame->max_ct_color) + 2) {
                     /* EOI code */
-                    goto gif_decode_end;
                 }
                 else {
                     if (code < code_table.length) {
@@ -226,8 +218,18 @@ void gif_decode(
                     }
 
                     /* Write to ct_indices */
-                    memcpy(frame->ct_indices + index_counter, rd_entry->indices, rd_entry->length);
                     for (k = 0; k < rd_entry->length; ++k) {
+                        while (frame_row < id->img_top || frame_row >= id->img_top + id->img_h ||
+                            frame_col < id->img_left || frame_col >= id->img_left + id->img_w) {
+                            /* Outside bounds of frame on canvas */
+
+                            frame->ct_indices[index_counter] = outside_bounds_index;
+
+                            if (!gif_increment_decode(gif, &frame_row, &frame_col, &index_counter)) {
+                                goto gif_decode_end;
+                            }
+                        }
+                        frame->ct_indices[index_counter] = rd_entry->indices[k];
                         if (!gif_increment_decode(gif, &frame_row, &frame_col, &index_counter)) {
                             goto gif_decode_end;
                         }
@@ -241,6 +243,12 @@ void gif_decode(
                 code_bit_index = 0;
             }
         }
+    }
+
+    /* Remaining out of bounds indices */
+    while (index_counter < gif->w * gif->h) {
+        frame->ct_indices[index_counter] = outside_bounds_index;
+        ++index_counter;
     }
 
 gif_decode_end:

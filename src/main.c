@@ -26,7 +26,7 @@
 #define CHUNK_LEDS 440  /* CHUNK_ROWS*CHUNK_COLS */
 #define HEADER_BYTES 14  /* sizeof(struct ether_header) = 6+6+2 */
 #define FRAME_BYTES 97  /* HEADER_BYTES+LED_INDEX_BYTES+DATA_BYTES */
-#define BRIGHTNESS_SCALE 0.5
+#define BRIGHTNESS_SCALE 0.2
 
 uint8_t frame_buffer[FRAME_BYTES];  /* One Ethernet frame contains data for one LED per chunk  */
 uint8_t color_frame[LED_ROWS][LED_COLS][LED_CHANNELS];  /* Colors for full dance floor */
@@ -49,6 +49,11 @@ void color_frame_to_eth(uint16_t led_index) {
     uint16_t frame_buffer_bit_index = 8 * (HEADER_BYTES + LED_INDEX_BYTES);
 
     memset(frame_buffer + HEADER_BYTES + LED_INDEX_BYTES, 0, DATA_BYTES);
+
+    /* LEDs snake between rows */
+    if (chunk_led_row % 2 == 0) {
+        chunk_led_col = CHUNK_COLS - chunk_led_col;
+    }
 
     for (i = 0; i < LED_CHANNELS; ++i) {
         /* For each bit of the current channel */
@@ -78,7 +83,7 @@ double get_millis(struct timeval *tv) {
     return tv->tv_sec * 1000 + tv->tv_usec / 1000.0; 
 }
 
-void load_gif_frame(struct gif *gif, struct frame *frame) {
+void load_gif_frame(struct frame *frame) {
     /* Copy frame data into color_frame */
     
     uint8_t i, j;
@@ -94,17 +99,9 @@ void load_gif_frame(struct gif *gif, struct frame *frame) {
                 continue;
             }
 
-            if (gif->has_gct && ct_index == gif->bg_index) {
-                /* Grab background color from GCT */
-                color_frame[i][j][0] = gif->gct[ct_index][1];  /* G */
-                color_frame[i][j][1] = gif->gct[ct_index][0];  /* R */
-                color_frame[i][j][2] = gif->gct[ct_index][2];  /* B */
-            }
-            else {
-                color_frame[i][j][0] = frame->ct[ct_index][1];
-                color_frame[i][j][1] = frame->ct[ct_index][0];
-                color_frame[i][j][2] = frame->ct[ct_index][2];
-            }
+            color_frame[i][j][0] = frame->ct[ct_index][1] * BRIGHTNESS_SCALE;
+            color_frame[i][j][1] = frame->ct[ct_index][0] * BRIGHTNESS_SCALE;
+            color_frame[i][j][2] = frame->ct[ct_index][2] * BRIGHTNESS_SCALE;
         }
     }
 }
@@ -124,24 +121,15 @@ int prep_gif(struct gif *gif, const char *filename) {
 
     frame = (struct frame *) dyn_arr_get(&(gif->frames), 0);
 
-    if (gif->has_gct) {
-        bg_r = gif->gct[gif->bg_index][0] * BRIGHTNESS_SCALE;
-        bg_g = gif->gct[gif->bg_index][1] * BRIGHTNESS_SCALE;
-        bg_b = gif->gct[gif->bg_index][2] * BRIGHTNESS_SCALE;
-    }
-    else {
-        bg_r = 0;
-        bg_g = 0;
-        bg_b = 0;
-    }
+    bg_r = frame->ct[gif->bg_index][0] * BRIGHTNESS_SCALE;
+    bg_g = frame->ct[gif->bg_index][1] * BRIGHTNESS_SCALE;
+    bg_b = frame->ct[gif->bg_index][2] * BRIGHTNESS_SCALE;
 
     for (i = 0; i < LED_ROWS; ++i) {
         for (j = 0; j < LED_COLS; ++j) {
             ct_index = frame->ct_indices[pixel_counter++];
-            if ((frame->has_transparency && ct_index == frame->transparent_index) ||
-                (gif->has_gct && ct_index == gif->bg_index)
-            ) {
-                /* Transparent pixel or background pixel both set to bg color */
+            if (frame->has_transparency && ct_index == frame->transparent_index) {
+                /* Transparent pixel set to bg color */
                 color_frame[i][j][0] = bg_g * BRIGHTNESS_SCALE;
                 color_frame[i][j][1] = bg_r * BRIGHTNESS_SCALE;
                 color_frame[i][j][2] = bg_b * BRIGHTNESS_SCALE;
@@ -178,7 +166,7 @@ void print_color_frame() {
     }
 }
 
-int main() {
+int main(int argc, char **argv) {
     int socket_fd;
     
     struct ifreq interface_id;
@@ -191,12 +179,18 @@ int main() {
 
     struct timeval tv;
     double millis;
+    double prev_millis = 0;
 
     double last_frame_millis = 0;
     uint16_t frame_index = 0;
     struct frame *current_frame;
 
     struct gif gif;
+
+    if (argc < 2) {
+        printf("Error: Please provide a GIF filename\n");
+        return ERROR_OUT;
+    }
 
     memset(frame_buffer, 0, FRAME_BYTES);
 
@@ -224,9 +218,16 @@ int main() {
     /* Construct Ethernet header */
     for (i = 0; i < 6; ++i) {
         eth_head->ether_shost[i] = ((uint8_t *) &interface_mac.ifr_hwaddr.sa_data)[i];
-        eth_head->ether_dhost[i] = 0xff;  /* Broadcast MAC address */
 
-        socket_address.sll_addr[i] = 0xff;  /* And same for sll_addr */
+        /* Local MAC address, should match what FPGA is expecting */
+        if (i == 0) {
+            eth_head->ether_dhost[i] = 0x02;
+            socket_address.sll_addr[i] = 0x02;
+        }
+        else {
+            eth_head->ether_dhost[i] = 0x00;
+            socket_address.sll_addr[i] = 0x00;
+        }
      }
     eth_head->ether_type = htons(ETH_P_IP);
 
@@ -235,7 +236,7 @@ int main() {
 
     /* Load GIF file */
     gif_init(&gif);
-    if (prep_gif(&gif, "img/sample2.gif") == ERROR_OUT) {
+    if (prep_gif(&gif, argv[1]) == ERROR_OUT) {
         return ERROR_OUT;
     }
     current_frame = (struct frame *) dyn_arr_get(&(gif.frames), 0);
@@ -243,6 +244,8 @@ int main() {
     #if DO_ETH
         while (1) {
             millis = get_millis(&tv);
+
+            printf("%f FPS\n", 1000 / (millis - prev_millis));
 
             if (millis - last_frame_millis >= current_frame->delay * 10) {
                 /* Switch to next frame */
@@ -259,7 +262,7 @@ int main() {
                 }
                 current_frame = (struct frame *) dyn_arr_get(&(gif.frames), frame_index);
                 last_frame_millis = millis;
-                load_gif_frame(&gif, current_frame);
+                load_gif_frame(current_frame);
             }
      
             /* Send Ethernet packets for each LED */
@@ -287,6 +290,8 @@ int main() {
 
                 usleep(10);
             }
+
+            prev_millis = millis;
         }
     #endif
 
