@@ -161,7 +161,6 @@ void gif_decode(
             outside_bounds_index = frame->transparent_index;
         }
         else {
-            printf("Warning: Disposal type is DISPOSAL_RETAIN, but frame has no transparent index\n");
             outside_bounds_index = gif->bg_index;
         }
     }

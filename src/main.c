@@ -8,14 +8,18 @@
 #include <net/if.h>
 #include <netinet/ether.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <termios.h>
 #include <sys/time.h>
 #include <math.h>
+#include <pthread.h>
 
 #include "global_defines.h"
 #include "gif.h"
 
 #define DO_ETH 1
 #define INTERFACE_NAME "enp2s0"
+#define SER_NAME "/dev/ttyACM0"
 #define CHUNKS 27
 #define LED_CHANNELS 3
 #define LED_BITS 24  /* LED_CHANNELS*8 */
@@ -26,10 +30,11 @@
 #define CHUNK_LEDS 440  /* CHUNK_ROWS*CHUNK_COLS */
 #define HEADER_BYTES 14  /* sizeof(struct ether_header) = 6+6+2 */
 #define FRAME_BYTES 97  /* HEADER_BYTES+LED_INDEX_BYTES+DATA_BYTES */
-#define BRIGHTNESS_SCALE 0.2
+#define MAX_BRIGHTNESS 0.2
 
 uint8_t frame_buffer[FRAME_BYTES];  /* One Ethernet frame contains data for one LED per chunk  */
 uint8_t color_frame[LED_ROWS][LED_COLS][LED_CHANNELS];  /* Colors for full dance floor */
+double brightness = 0;
 
 void color_frame_to_eth(uint16_t led_index) {
     /* 
@@ -99,9 +104,9 @@ void load_gif_frame(struct frame *frame) {
                 continue;
             }
 
-            color_frame[i][j][0] = frame->ct[ct_index][1] * BRIGHTNESS_SCALE;
-            color_frame[i][j][1] = frame->ct[ct_index][0] * BRIGHTNESS_SCALE;
-            color_frame[i][j][2] = frame->ct[ct_index][2] * BRIGHTNESS_SCALE;
+            color_frame[i][j][0] = frame->ct[ct_index][1] * brightness;
+            color_frame[i][j][1] = frame->ct[ct_index][0] * brightness;
+            color_frame[i][j][2] = frame->ct[ct_index][2] * brightness;
         }
     }
 }
@@ -121,23 +126,23 @@ int prep_gif(struct gif *gif, const char *filename) {
 
     frame = (struct frame *) dyn_arr_get(&(gif->frames), 0);
 
-    bg_r = frame->ct[gif->bg_index][0] * BRIGHTNESS_SCALE;
-    bg_g = frame->ct[gif->bg_index][1] * BRIGHTNESS_SCALE;
-    bg_b = frame->ct[gif->bg_index][2] * BRIGHTNESS_SCALE;
+    bg_r = frame->ct[gif->bg_index][0] * brightness;
+    bg_g = frame->ct[gif->bg_index][1] * brightness;
+    bg_b = frame->ct[gif->bg_index][2] * brightness;
 
     for (i = 0; i < LED_ROWS; ++i) {
         for (j = 0; j < LED_COLS; ++j) {
             ct_index = frame->ct_indices[pixel_counter++];
             if (frame->has_transparency && ct_index == frame->transparent_index) {
                 /* Transparent pixel set to bg color */
-                color_frame[i][j][0] = bg_g * BRIGHTNESS_SCALE;
-                color_frame[i][j][1] = bg_r * BRIGHTNESS_SCALE;
-                color_frame[i][j][2] = bg_b * BRIGHTNESS_SCALE;
+                color_frame[i][j][0] = bg_g * brightness;
+                color_frame[i][j][1] = bg_r * brightness;
+                color_frame[i][j][2] = bg_b * brightness;
             }
             else {
-                color_frame[i][j][0] = frame->ct[ct_index][1] * BRIGHTNESS_SCALE;
-                color_frame[i][j][1] = frame->ct[ct_index][0] * BRIGHTNESS_SCALE;
-                color_frame[i][j][2] = frame->ct[ct_index][2] * BRIGHTNESS_SCALE;
+                color_frame[i][j][0] = frame->ct[ct_index][1] * brightness;
+                color_frame[i][j][1] = frame->ct[ct_index][0] * brightness;
+                color_frame[i][j][2] = frame->ct[ct_index][2] * brightness;
             }
         }
     }
@@ -163,6 +168,66 @@ void print_color_frame() {
             printf("0x%X ", formatted_color);
         }
         printf("\n");
+    }
+}
+
+int get_ser_fd(int *fd) {
+    struct termios tty;
+
+    if ((*fd = open(SER_NAME, O_RDONLY | O_NOCTTY | O_SYNC)) < 0) {
+        perror("Error [open serial]");
+        return ERROR_OUT;
+    }
+
+    if (tcgetattr(*fd, &tty) != 0) {
+        perror("Error [tcgetattr]");
+        return ERROR_OUT;
+    }
+
+    cfsetispeed(&tty, B9600);
+    
+    tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;
+    tty.c_cflag |= (CLOCAL | CREAD);
+    tty.c_cflag &= ~(PARENB | PARODD);
+    tty.c_cflag &= ~CSTOPB;
+    tty.c_cflag &= ~CRTSCTS;
+
+    tty.c_iflag &= ~IGNBRK;
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+
+    tty.c_lflag = 0;
+
+    tty.c_cc[VMIN] = 0;
+    tty.c_cc[VTIME] = 5;
+
+    if (tcsetattr(*fd, TCSANOW, &tty) != 0) {
+        perror("Error [tcsetattr]");
+        return ERROR_OUT;
+    }
+
+    return SUCC_OUT;
+}
+
+void update_brightness(int ser_fd) {
+    char rd_char;
+    int rd_size = read(ser_fd, &rd_char, 1);
+    if (rd_size == 0) {
+        return;
+    }
+
+    brightness = (uint8_t) rd_char / 255.0 * MAX_BRIGHTNESS;
+}
+
+void *ser_thread_func(void *args __attribute__((unused))) {
+    int ser_fd;
+
+    if (get_ser_fd(&ser_fd) == ERROR_OUT) {
+        brightness = MAX_BRIGHTNESS;
+        pthread_exit(0);
+    }
+
+    while (1) {
+        update_brightness(ser_fd);
     }
 }
 
@@ -233,6 +298,11 @@ int main(int argc, char **argv) {
 
     socket_address.sll_ifindex = interface_id.ifr_ifindex;
     socket_address.sll_halen = ETH_ALEN;
+
+    /* Control brightness using serial input on separate thread */
+    pthread_t ser_thread;
+    pthread_create(&ser_thread, NULL, ser_thread_func, NULL);
+    pthread_detach(ser_thread);
 
     /* Load GIF file */
     gif_init(&gif);

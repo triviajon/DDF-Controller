@@ -1,7 +1,7 @@
 #ifndef GLOBAL_DEFINES_H
 #define GLOBAL_DEFINES_H
 
-#define DEBUG 1
+#define DEBUG 0
 #define DEBUG_CT 0
 
 #define SUCC_OUT 0
