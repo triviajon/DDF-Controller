@@ -9,6 +9,7 @@
 
 #define LED_ROWS 72
 #define LED_COLS 165
+#define LED_CHANNELS 3
 
 #endif
 

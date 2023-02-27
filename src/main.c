@@ -16,12 +16,12 @@
 
 #include "global_defines.h"
 #include "gif.h"
+#include "game_test.h"
 
 #define DO_ETH 1
 #define INTERFACE_NAME "enp2s0"
 #define SER_NAME "/dev/ttyACM0"
 #define CHUNKS 27
-#define LED_CHANNELS 3
 #define LED_BITS 24  /* LED_CHANNELS*8 */
 #define CHUNK_ROWS 8
 #define CHUNK_COLS 55
@@ -31,6 +31,7 @@
 #define HEADER_BYTES 14  /* sizeof(struct ether_header) = 6+6+2 */
 #define FRAME_BYTES 97  /* HEADER_BYTES+LED_INDEX_BYTES+DATA_BYTES */
 #define MAX_BRIGHTNESS 0.05
+#define GAME_BRIGHTNESS 0.2
 
 uint8_t frame_buffer[FRAME_BYTES];  /* One Ethernet frame contains data for one LED per chunk  */
 uint8_t color_frame[LED_ROWS][LED_COLS][LED_CHANNELS];  /* Colors for full dance floor */
@@ -107,9 +108,9 @@ void load_gif_frame(struct frame *frame) {
                 color_frame[i][j][2] = frame->ct[ct_index][2];
             }
 
-            color_frame_adj[i][j][0] = color_frame[i][j][0] * brightness;//0
-            color_frame_adj[i][j][1] = color_frame[i][j][1] * brightness;//20
-            color_frame_adj[i][j][2] = color_frame[i][j][2] * brightness;//0
+            color_frame_adj[i][j][0] = color_frame[i][j][0] * brightness;
+            color_frame_adj[i][j][1] = color_frame[i][j][1] * brightness;
+            color_frame_adj[i][j][2] = color_frame[i][j][2] * brightness;
         }
     }
 }
@@ -247,6 +248,7 @@ int main(int argc, char **argv) {
     struct sockaddr_ll socket_address;
 
     uint16_t i;
+    uint8_t j, k;
 
     struct timeval tv;
     double millis;
@@ -256,10 +258,19 @@ int main(int argc, char **argv) {
     uint16_t frame_index = 0;
     struct frame *current_frame;
 
+    pthread_t ser_thread;
     struct gif gif;
 
+    uint8_t is_game = 1;
+    void *game_obj;
+    void (*game_init_func)(void *, uint8_t[LED_ROWS][LED_COLS][LED_CHANNELS]);
+    void (*game_loop_func)(void *, uint8_t[LED_ROWS][LED_COLS][LED_CHANNELS]);
+
+    /* Add all game structs here */
+    struct game_test game_test;
+
     if (argc < 2) {
-        printf("Error: Please provide a GIF filename\n");
+        printf("Error: Please provide a GIF filename or game mode\n");
         return ERROR_OUT;
     }
 
@@ -299,23 +310,38 @@ int main(int argc, char **argv) {
             eth_head->ether_dhost[i] = 0x00;
             socket_address.sll_addr[i] = 0x00;
         }
-     }
+    }
     eth_head->ether_type = htons(ETH_P_IP);
 
     socket_address.sll_ifindex = interface_id.ifr_ifindex;
     socket_address.sll_halen = ETH_ALEN;
 
-    /* Control brightness using serial input on separate thread */
-    pthread_t ser_thread;
-    pthread_create(&ser_thread, NULL, ser_thread_func, NULL);
-    pthread_detach(ser_thread);
-
-    /* Load GIF file */
-    gif_init(&gif);
-    if (prep_gif(&gif, argv[1]) == ERROR_OUT) {
-        return ERROR_OUT;
+    /* For each game, set game_obj, game_init_func, and game_loop_func if
+       the corresponding command line argument is passed */
+    if (!strcmp(argv[1], "test")) {
+        game_obj = &game_test;
+        game_init_func = &game_test_init;
+        game_loop_func = &game_test_loop;
     }
-    current_frame = (struct frame *) dyn_arr_get(&(gif.frames), 0);
+    else {
+        /* Not a game, load GIF file */
+        is_game = 0;
+
+        /* Control brightness using serial input on separate thread */
+        pthread_create(&ser_thread, NULL, ser_thread_func, NULL);
+        pthread_detach(ser_thread);
+
+        /* Load GIF file */
+        gif_init(&gif);
+        if (prep_gif(&gif, argv[1]) == ERROR_OUT) {
+            return ERROR_OUT;
+        }
+        current_frame = (struct frame *) dyn_arr_get(&(gif.frames), 0);
+    }
+
+    if (is_game) {
+       (*game_init_func)(game_obj, color_frame_adj);
+    }
 
     #if DO_ETH
         while (1) {
@@ -323,22 +349,30 @@ int main(int argc, char **argv) {
 
             printf("%f FPS\n", 1000 / (millis - prev_millis));
 
-            if (millis - last_frame_millis >= current_frame->delay * 10) {
-                /* Switch to next frame */
-                ++frame_index;
-                /*
-                printf(
-                    "Frame period target: %d, hit: %f\n",
-                    current_frame->delay * 10,
-                    millis - last_frame_millis
-                );
-                */
-                if (frame_index == gif.frames.length) {
-                    frame_index = 0;
+            if (is_game) {
+                (*game_loop_func)(game_obj, color_frame_adj);
+
+                /* Limit game brightness */
+                for (i = 0; i < LED_ROWS; ++i) {
+                    for (j = 0; j < LED_COLS; ++j) {
+                        for (k = 0; k < LED_CHANNELS; ++k) {
+                            color_frame_adj[i][j][k] *= GAME_BRIGHTNESS;
+                        }
+                    }
                 }
-                current_frame = (struct frame *) dyn_arr_get(&(gif.frames), frame_index);
-                last_frame_millis = millis;
-                load_gif_frame(current_frame);
+            }
+            else {
+                /* Animate loaded GIF file */
+                if (millis - last_frame_millis >= current_frame->delay * 10) {
+                    /* Switch to next frame */
+                    ++frame_index;
+                    if (frame_index == gif.frames.length) {
+                        frame_index = 0;
+                    }
+                    current_frame = (struct frame *) dyn_arr_get(&(gif.frames), frame_index);
+                    last_frame_millis = millis;
+                    load_gif_frame(current_frame);
+                }
             }
      
             /* Send Ethernet packets for each LED */
