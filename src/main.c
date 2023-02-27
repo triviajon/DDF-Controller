@@ -30,10 +30,11 @@
 #define CHUNK_LEDS 440  /* CHUNK_ROWS*CHUNK_COLS */
 #define HEADER_BYTES 14  /* sizeof(struct ether_header) = 6+6+2 */
 #define FRAME_BYTES 97  /* HEADER_BYTES+LED_INDEX_BYTES+DATA_BYTES */
-#define MAX_BRIGHTNESS 0.2
+#define MAX_BRIGHTNESS 0.05
 
 uint8_t frame_buffer[FRAME_BYTES];  /* One Ethernet frame contains data for one LED per chunk  */
 uint8_t color_frame[LED_ROWS][LED_COLS][LED_CHANNELS];  /* Colors for full dance floor */
+uint8_t color_frame_adj[LED_ROWS][LED_COLS][LED_CHANNELS];  /* Colors with adjusted brightness */
 double brightness = 0;
 
 void color_frame_to_eth(uint16_t led_index) {
@@ -72,7 +73,7 @@ void color_frame_to_eth(uint16_t led_index) {
 
                     /* Select bit j from color_frame, place in chunk_index bit of current_bits */
                     frame_buffer[frame_buffer_bit_index / 8] |= (
-                        ((color_frame[led_row][led_col][i] >> (7 - j)) & 1U) <<
+                        ((color_frame_adj[led_row][led_col][i] >> (7 - j)) & 1U) <<
                         frame_buffer_bit_index % 8
                     );
 
@@ -99,14 +100,16 @@ void load_gif_frame(struct frame *frame) {
         for (j = 0; j < LED_COLS; ++j) {
             ct_index = frame->ct_indices[pixel_counter++];
         
-            if (frame->has_transparency && ct_index == frame->transparent_index) {
+            if (!frame->has_transparency || ct_index != frame->transparent_index) {
                 /* Transparent pixel retains same color */
-                continue;
+                color_frame[i][j][0] = frame->ct[ct_index][1];
+                color_frame[i][j][1] = frame->ct[ct_index][0];
+                color_frame[i][j][2] = frame->ct[ct_index][2];
             }
 
-            color_frame[i][j][0] = frame->ct[ct_index][1] * brightness;
-            color_frame[i][j][1] = frame->ct[ct_index][0] * brightness;
-            color_frame[i][j][2] = frame->ct[ct_index][2] * brightness;
+            color_frame_adj[i][j][0] = color_frame[i][j][0] * brightness;//0
+            color_frame_adj[i][j][1] = color_frame[i][j][1] * brightness;//20
+            color_frame_adj[i][j][2] = color_frame[i][j][2] * brightness;//0
         }
     }
 }
@@ -126,24 +129,27 @@ int prep_gif(struct gif *gif, const char *filename) {
 
     frame = (struct frame *) dyn_arr_get(&(gif->frames), 0);
 
-    bg_r = frame->ct[gif->bg_index][0] * brightness;
-    bg_g = frame->ct[gif->bg_index][1] * brightness;
-    bg_b = frame->ct[gif->bg_index][2] * brightness;
+    bg_r = frame->ct[gif->bg_index][0];
+    bg_g = frame->ct[gif->bg_index][1];
+    bg_b = frame->ct[gif->bg_index][2];
 
     for (i = 0; i < LED_ROWS; ++i) {
         for (j = 0; j < LED_COLS; ++j) {
             ct_index = frame->ct_indices[pixel_counter++];
             if (frame->has_transparency && ct_index == frame->transparent_index) {
                 /* Transparent pixel set to bg color */
-                color_frame[i][j][0] = bg_g * brightness;
-                color_frame[i][j][1] = bg_r * brightness;
-                color_frame[i][j][2] = bg_b * brightness;
+                color_frame[i][j][0] = bg_g;
+                color_frame[i][j][1] = bg_r;
+                color_frame[i][j][2] = bg_b;
             }
             else {
-                color_frame[i][j][0] = frame->ct[ct_index][1] * brightness;
-                color_frame[i][j][1] = frame->ct[ct_index][0] * brightness;
-                color_frame[i][j][2] = frame->ct[ct_index][2] * brightness;
+                color_frame[i][j][0] = frame->ct[ct_index][1];
+                color_frame[i][j][1] = frame->ct[ct_index][0];
+                color_frame[i][j][2] = frame->ct[ct_index][2];
             }
+            color_frame_adj[i][j][0] = color_frame[i][j][0] * brightness;
+            color_frame_adj[i][j][1] = color_frame[i][j][1] * brightness;
+            color_frame_adj[i][j][2] = color_frame[i][j][2] * brightness;
         }
     }
 
