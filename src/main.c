@@ -17,6 +17,7 @@
 #include "global_defines.h"
 #include "gif.h"
 #include "game_test.h"
+#include "kb.h"
 
 #define DO_ETH 1
 #define INTERFACE_NAME "enp2s0"
@@ -340,7 +341,10 @@ int main(int argc, char **argv) {
     }
 
     if (is_game) {
-       (*game_init_func)(game_obj, color_frame_adj);
+        if (kb_init() == ERROR_OUT) {
+            return ERROR_OUT;
+        }
+       (*game_init_func)(game_obj, color_frame_adj); 
     }
 
     #if DO_ETH
@@ -350,6 +354,7 @@ int main(int argc, char **argv) {
             printf("%f FPS\n", 1000 / (millis - prev_millis));
 
             if (is_game) {
+                kb_update_map();
                 (*game_loop_func)(game_obj, color_frame_adj);
 
                 /* Limit game brightness */
@@ -405,7 +410,12 @@ int main(int argc, char **argv) {
         }
     #endif
 
-    gif_free(&gif);
+    if (is_game) {
+        kb_free();
+    }
+    else {
+        gif_free(&gif);
+    }
     close(socket_fd);
 
     return SUCC_OUT;

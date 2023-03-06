@@ -19,6 +19,8 @@ void game_test_loop(
     uint8_t i, j;
     uint8_t max_brightness = 240;
 
+    printf("space is pressed: %d\n", kb_read_map(KEY_SPACE));
+
     if (game->color_value == max_brightness || game->color_value == 0) {
         game->direction *= -1;
     }

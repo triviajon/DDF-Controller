@@ -5,6 +5,7 @@
 #include <stdio.h>
 
 #include "global_defines.h"
+#include "kb.h"
 
 struct game_test {
     /* Use the game's struct to store game state info */
