@@ -1,26 +1,26 @@
 #include "game_connect_four.h"
 
-const NUM_ROWS = 6;
-const NUM_COLUMNS = 7;
-const WIN_LENGTH = 4;
-typedef enum {GAME_BOARD, IN_USE_BOARD} BoardType_t; 
+const int NUM_ROWS = 6;
+const int NUM_COLUMNS = 7;
+const int WIN_LENGTH = 4;
 
 uint8_t get_board(void *game_connect_four, BoardType_t bt, uint8_t row, uint8_t col) {
     struct game_connect_four *game = (struct game_connect_four *) game_connect_four;
-    if (row > NUM_ROWS - 1 || row < 0) { return; }
-    if (col > NUM_COLUMNS -1 || col < 0) { return; }
+    if (row > NUM_ROWS - 1) { return 0; }
+    if (col > NUM_COLUMNS -1) { return 0; }
 
     if (bt == GAME_BOARD) {
-        return (game->board >> (8*row + (7-col))) && 1;
+        return (game->board >> (8*row + (7-col))) & 1;
     } else {
-        return (game->board_in_use >> (8*row + (7-col))) && 1;
+        return (game->board_in_use >> (8*row + (7-col))) & 1;
     }
 }
 
 void set_board(void *game_connect_four, BoardType_t bt, uint8_t row, uint8_t col, uint8_t value) {
     struct game_connect_four *game = (struct game_connect_four *) game_connect_four;
-    if (row > NUM_ROWS - 1 || row < 0) { return; }
-    if (col > NUM_COLUMNS -1 || col < 0) { return; }
+    if (row > NUM_ROWS - 1) { return; }
+    if (col > NUM_COLUMNS -1) { return; }
+
     if (bt == GAME_BOARD) {
         game->board |= (value << (8*row + (7-col)));
     } else {
@@ -31,7 +31,7 @@ void set_board(void *game_connect_four, BoardType_t bt, uint8_t row, uint8_t col
 
 uint8_t add_to_col(void *game_connect_four, uint8_t column) {
     struct game_connect_four *game = (struct game_connect_four *) game_connect_four;
-    if (column > NUM_COLUMNS - 1 || column < 0) {
+    if (column > NUM_COLUMNS - 1) {
         return 0;
     }
 
@@ -39,7 +39,7 @@ uint8_t add_to_col(void *game_connect_four, uint8_t column) {
         uint8_t cell_occupied = get_board(game_connect_four, IN_USE_BOARD, row, column);
         if (!cell_occupied) {
             set_board(game_connect_four, GAME_BOARD, row, column, game->turn);
-            set_board_in_use(game_connect_four, IN_USE_BOARD, row, column, 1);
+            set_board(game_connect_four, IN_USE_BOARD, row, column, 1);
             return 1;
         }
     }
@@ -53,8 +53,9 @@ uint8_t won(void *game_connect_four) {
     for (uint8_t row = 0; row < NUM_ROWS; row++) {
         uint8_t cons = 0;
         for (uint8_t col = 0; col < NUM_COLUMNS; col++) {
-            if (get_board(game_connect_four, IN_USE_BOARD, row, col) == 0 && get_board(game_connect_four, GAME_BOARD, row, col) == game->turn) {
+            if (get_board(game_connect_four, IN_USE_BOARD, row, col) == 1 && get_board(game_connect_four, GAME_BOARD, row, col) == game->turn) {
                 cons += 1;
+                printf("row, col = %d, %d\n", row, col);
             }
             else {
                 cons = 0;
@@ -67,7 +68,7 @@ uint8_t won(void *game_connect_four) {
     for (uint8_t col = 0; col < NUM_COLUMNS; col++) {
         uint8_t cons = 0;
         for (uint8_t row = 0; row < NUM_ROWS; row++) {
-            if (get_board(game_connect_four, IN_USE_BOARD, row, col) == 0 && get_board(game_connect_four, GAME_BOARD, row, col) == game->turn) {
+            if (get_board(game_connect_four, IN_USE_BOARD, row, col) == 1 && get_board(game_connect_four, GAME_BOARD, row, col) == game->turn) {
                 cons += 1;
             }
             else {
@@ -117,5 +118,5 @@ void game_connect_four_init(void *game_connect_four, uint8_t color_frame[LED_ROW
 
 void game_connect_four_loop(void *game_connect_four, uint8_t color_frame[LED_ROWS][LED_COLS][LED_CHANNELS]) {
     // update 
-    struct game_connect_four *game = (struct game_connect_four *) game_connect_four;
+    // struct game_connect_four *game = (struct game_connect_four *) game_connect_four;   
 }

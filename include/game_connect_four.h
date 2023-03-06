@@ -20,6 +20,8 @@ struct game_connect_four {
     uint64_t board_in_use;
 };
 
+typedef enum {GAME_BOARD, IN_USE_BOARD} BoardType_t; 
+
 /// @brief Gets the value at specified board and returns it
 /// @param game_connect_four ref to connect_four instance
 /// @param bt BoardType_t representing the board to look at
